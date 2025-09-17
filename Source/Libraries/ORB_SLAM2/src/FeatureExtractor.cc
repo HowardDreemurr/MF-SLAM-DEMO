@@ -1,0 +1,124 @@
+#include "FeatureExtractor.h"
+#include <opencv2/imgproc/imgproc.hpp>
+
+using namespace ::std;
+
+namespace ORB_SLAM2 {
+
+FeatureExtractor::FeatureExtractor(int _nfeatures, float _scaleFactor,
+                                   int _nlevels, int _iniThFAST, int _minThFAST)
+    : nfeatures(_nfeatures), scaleFactor(_scaleFactor), nlevels(_nlevels),
+      iniThFAST(_iniThFAST), minThFAST(_minThFAST) {
+  FeatureExtractor::InitPyramidParameters();
+}
+
+FeatureExtractor::FeatureExtractor(const cv::FileNode& config, bool init) {
+  nfeatures   = config["nFeatures"].empty()    ? 2000 : (int)config["nFeatures"];
+  scaleFactor = config["scaleFactor"].empty()  ? 1.2f : (float)config["scaleFactor"];
+  nlevels     = config["nLevels"].empty()      ? 8    : (int)config["nLevels"];
+  iniThFAST   = config["iniThFAST"].empty()    ? 20   : (int)config["iniThFAST"];
+  minThFAST   = config["minThFAST"].empty()    ? 7    : (int)config["minThFAST"];
+
+  // Double num of feature when the extractor is for initialization.
+  if (init == true) nfeatures *= 2;
+
+  FeatureExtractor::InitPyramidParameters();
+}
+
+cv::Mat FeatureExtractor::GetEdgedMask(int edge, cv::InputArray image, cv::InputArray mask) {
+  cv::Mat matMask;
+  if (mask.empty())
+  {
+    matMask = cv::Mat(image.size(), CV_8UC1, cv::Scalar(255));
+  }
+  else
+  {
+    mask.getMat().copyTo(matMask);
+  }
+  matMask.rowRange(0,  edge).setTo(0);
+  matMask.rowRange(image.rows() -  edge, image.rows()).setTo(0);
+  matMask.colRange(0,  edge).setTo(0);
+  matMask.colRange(image.cols() -  edge, image.cols()).setTo(0);
+  return matMask;
+}
+
+void FeatureExtractor::InitPyramidParameters() {
+
+  mvScaleFactor.resize(nlevels);
+  mvLevelSigma2.resize(nlevels);
+  mvScaleFactor[0] = 1.0f;
+  mvLevelSigma2[0] = 1.0f;
+  for (int i = 1; i < nlevels; i++) {
+    mvScaleFactor[i] = mvScaleFactor[i - 1] * scaleFactor;
+    mvLevelSigma2[i] = mvScaleFactor[i] * mvScaleFactor[i];
+  }
+
+  mvInvScaleFactor.resize(nlevels);
+  mvInvLevelSigma2.resize(nlevels);
+  for (int i = 0; i < nlevels; i++) {
+    mvInvScaleFactor[i] = 1.0f / mvScaleFactor[i];
+    mvInvLevelSigma2[i] = 1.0f / mvLevelSigma2[i];
+  }
+
+  mvImagePyramid.resize(nlevels);
+
+  mnFeaturesPerLevel.resize(nlevels);
+  float factor = 1.0f / scaleFactor;
+  float nDesiredFeaturesPerScale =
+      nfeatures * (1 - factor) /
+      (1 - (float)pow((double)factor, (double)nlevels));
+
+  int sumFeatures = 0;
+  for (int level = 0; level < nlevels - 1; level++) {
+    mnFeaturesPerLevel[level] = cvRound(nDesiredFeaturesPerScale);
+    sumFeatures += mnFeaturesPerLevel[level];
+    nDesiredFeaturesPerScale *= factor;
+  }
+  mnFeaturesPerLevel[nlevels - 1] = std::max(nfeatures - sumFeatures, 0);
+
+  // This is for orientation
+  // pre-compute the end of a row in a circular patch
+  umax.resize(HALF_PATCH_SIZE + 1);
+
+  int v, v0, vmax = cvFloor(HALF_PATCH_SIZE * sqrt(2.f) / 2 + 1);
+  int vmin = cvCeil(HALF_PATCH_SIZE * sqrt(2.f) / 2);
+  const double hp2 = HALF_PATCH_SIZE * HALF_PATCH_SIZE;
+  for (v = 0; v <= vmax; ++v)
+    umax[v] = cvRound(sqrt(hp2 - v * v));
+
+  // Make sure we are symmetric
+  for (v = HALF_PATCH_SIZE, v0 = 0; v >= vmin; --v) {
+    while (umax[v0] == umax[v0 + 1])
+      ++v0;
+    umax[v] = v0;
+    ++v0;
+  }
+}
+
+void FeatureExtractor::ComputePyramid(cv::Mat image) {
+  for (int level = 0; level < nlevels; ++level) {
+    float scale = mvInvScaleFactor[level];
+    cv::Size sz(cvRound((float)image.cols * scale),
+            cvRound((float)image.rows * scale));
+    cv::Size wholeSize(sz.width + EDGE_THRESHOLD * 2,
+                   sz.height + EDGE_THRESHOLD * 2);
+    cv::Mat temp(wholeSize, image.type()), masktemp;
+    mvImagePyramid[level] =
+        temp(cv::Rect(EDGE_THRESHOLD, EDGE_THRESHOLD, sz.width, sz.height));
+
+    // Compute the resized image
+    if (level != 0) {
+      cv::resize(mvImagePyramid[level - 1], mvImagePyramid[level], sz, 0, 0,
+             cv::INTER_LINEAR);
+
+      cv::copyMakeBorder(mvImagePyramid[level], temp, EDGE_THRESHOLD,
+                     EDGE_THRESHOLD, EDGE_THRESHOLD, EDGE_THRESHOLD,
+                     cv::BORDER_REFLECT_101 + cv::BORDER_ISOLATED);
+    } else {
+      cv::copyMakeBorder(image, temp, EDGE_THRESHOLD, EDGE_THRESHOLD,
+                     EDGE_THRESHOLD, EDGE_THRESHOLD, cv::BORDER_REFLECT_101);
+    }
+  }
+}
+
+} // namespace ORB_SLAM2
